@@ -1,0 +1,142 @@
+//@version=5
+strategy("Final AlgoTrading (S&P Only))", overlay=true, initial_capital=1000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// --- 1. INPUTS ---
+ny_timezone = input.string("America/New_York", title="Timezone") 
+pm_time = input.session("0700-0900", title="Pre-Market Time (Target)")
+trading_session = input.session("0930-1050", title="Trading Window") 
+
+// UNIVERSAL FILTER SETTINGS (ATR Based)
+vol_mult = input.float(1.5, title="Min Volume (x Average)") 
+atr_mult = input.float(0.5, title="Min Candle Body (x ATR)") 
+
+// VISUAL SETTINGS
+col_profit = input.color(color.new(color.green, 80), title="Profit Box")
+col_loss = input.color(color.new(color.red, 80), title="Risk Box")
+col_border = input.color(color.new(color.gray, 60), title="Border")
+col_kz_box = input.color(color.new(color.blue, 90), title="Killzone Box (9:00-9:30)")
+
+// --- 2. TIME LOGIC ---
+t_pm = time(timeframe.period, pm_time, ny_timezone)
+inPreMarket = not na(t_pm)
+t_kz = time(timeframe.period, "0900-0930", ny_timezone)
+inKZ = not na(t_kz)
+t_trade = time(timeframe.period, trading_session, ny_timezone)
+inTrading = not na(t_trade)
+
+// --- 3. VARIABLES ---
+var float pmHigh = na
+var float pmLow = na
+var float kzHigh = na
+var float kzLow = na
+var bool highSwept = false
+var bool lowSwept = false
+var int tradesToday = 0
+
+// Box Variables
+var box activeTPBox = na
+var box activeSLBox = na
+
+// KILLZONE BOX VARIABLES (NEW)
+var box kzBox = na
+var int kzStartBar = na
+
+if dayofmonth(time, ny_timezone) != dayofmonth(time[1], ny_timezone)
+    tradesToday := 0
+    highSwept := false
+    lowSwept := false
+    activeTPBox := na
+    activeSLBox := na
+    kzBox := na
+    kzStartBar := na
+    
+// INDICATORS
+vol_avg = ta.sma(volume, 20)
+current_atr = ta.atr(14)
+
+// --- 4. CAPTURE LEVELS ---
+if inPreMarket
+    if not inPreMarket[1]
+        pmHigh := high
+        pmLow := low
+    else
+        pmHigh := math.max(pmHigh, high)
+        pmLow := math.min(pmLow, low)
+
+if inKZ
+    if not inKZ[1]
+        kzHigh := high
+        kzLow := low
+        kzStartBar := bar_index
+        // CREATE KILLZONE BOX (NEW)
+        kzBox := box.new(bar_index, high, bar_index, low, bgcolor=col_kz_box, border_color=color.blue, border_style=line.style_dashed, border_width=1)
+    else
+        kzHigh := math.max(kzHigh, high)
+        kzLow := math.min(kzLow, low)
+        // UPDATE KILLZONE BOX (NEW)
+        if not na(kzBox)
+            box.set_top(kzBox, kzHigh)
+            box.set_bottom(kzBox, kzLow)
+            box.set_right(kzBox, bar_index)
+
+// LOCK KILLZONE BOX WHEN SESSION ENDS (NEW)
+if not inKZ and inKZ[1] and not na(kzBox)
+    box.set_right(kzBox, bar_index)
+
+// --- 5. EXECUTION ---
+if inTrading
+    
+    // Track Sweeps
+    if high > kzHigh
+        highSwept := true
+    if low < kzLow
+        lowSwept := true
+
+    // REVERSAL LOGIC
+    if tradesToday == 0 and not na(pmHigh) and not na(pmLow)
+        
+        // Calculate Body Size
+        float bodySize = math.abs(close - open)
+        // Check if Body is huge enough (Relative to ATR)
+        bool isBigCandle = bodySize > (current_atr * atr_mult)
+        
+        // BUY SETUP
+        bool isBuyImbalance = close > open and close > kzLow and volume > (vol_avg * vol_mult) and isBigCandle
+        
+        if lowSwept and isBuyImbalance
+            strategy.entry("Long Reversal", strategy.long)
+            strategy.exit("Exit Long", "Long Reversal", stop=low, limit=pmHigh)
+            tradesToday := 1
+            
+            // Draw Boxes
+            activeTPBox := box.new(bar_index, close, bar_index + 5, pmHigh, bgcolor=col_profit, border_color=col_border, border_width=1)
+            activeSLBox := box.new(bar_index, close, bar_index + 5, low, bgcolor=col_loss, border_color=col_border, border_width=1)
+
+        // SELL SETUP
+        bool isSellImbalance = close < open and close < kzHigh and volume > (vol_avg * vol_mult) and isBigCandle
+        
+        if highSwept and isSellImbalance
+            strategy.entry("Short Reversal", strategy.short)
+            strategy.exit("Exit Short", "Short Reversal", stop=high, limit=pmLow)
+            tradesToday := 1
+            
+            // Draw Boxes
+            activeTPBox := box.new(bar_index, close, bar_index + 5, pmLow, bgcolor=col_profit, border_color=col_border, border_width=1)
+            activeSLBox := box.new(bar_index, close, bar_index + 5, high, bgcolor=col_loss, border_color=col_border, border_width=1)
+
+// --- EXTEND BOXES ---
+if strategy.position_size != 0
+    if not na(activeTPBox)
+        box.set_right(activeTPBox, bar_index + 2)
+    if not na(activeSLBox)
+        box.set_right(activeSLBox, bar_index + 2)
+
+// FORCE CLOSE
+if not inTrading and inTrading[1]
+    strategy.close_all(comment="Time Close")
+    activeTPBox := na
+    activeSLBox := na
+
+// --- PLOT ---
+plot(inTrading ? kzHigh : na, "Session High", color.red, 1, plot.style_linebr)
+plot(inTrading ? kzLow : na, "Session Low", color.green, 1, plot.style_linebr)
